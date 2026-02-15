@@ -177,6 +177,6 @@ Logs are written to the path specified in `log_path` (default: `/tmp/tinker-rl`)
 ## Additional Resources
 
 - **OpenReward Environments**: https://openreward.ai/environments
-- **OpenReward Documentation**: https://docs.openreward.org/
+- **OpenReward Documentation**: https://docs.openreward.ai/
 - **Tinker Documentation**: https://tinker-docs.thinkingmachines.ai/
 - **WandB Documentation**: https://docs.wandb.ai/

@@ -169,7 +169,7 @@ tinker/
 ```
 
 ### OpenReward Trajectories
-View detailed rollout trajectories at your OpenReward dashboard. Each rollout is uploaded with full conversation history and tool interactions.
+View detailed rollout trajectories at your OpenReward runs page.
 
 ### Local Logs
 Logs are written to the path specified in `log_path` (default: `/tmp/tinker-rl`).

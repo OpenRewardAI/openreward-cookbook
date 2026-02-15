@@ -1,0 +1,12 @@
+# Core dependencies for Tinker RL Training
+openreward>=0.1.22
+tinker>=0.13.1
+wandb>=0.25.0
+transformers>=4.56.0
+torch>=2.3.0
+pydantic>=2.11.0
+pydantic-settings>=2.10.0
+python-dotenv>=1.1.0
+PyYAML>=6.0.0
+fire>=0.7.0
+numpy>=1.25.0

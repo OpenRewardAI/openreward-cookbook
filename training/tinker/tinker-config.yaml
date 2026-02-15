@@ -1,0 +1,61 @@
+# Example config for tinker_rl.py
+# Multi-environment RL training with Tinker + OpenReward
+
+wandb_project_name: "tinker-test"
+wandb_run_name: "tinker-rl-test-openreward"
+openreward_run_name: "tinker-rl-test-openreward"
+log_path: "/tmp/tinker-rl"
+
+# Global secrets (optional)
+# Use null to explicitly fall back to environment variables
+# Omit entirely if the secret is not needed
+secrets:
+  openai_api_key: null  # Will use OPENAI_API_KEY from environment
+  # anthropic_api_key: null  # Uncomment if needed
+
+# Model
+model_name: "Qwen/Qwen3-30B-A3B"
+lora_rank: 8
+# resume_from: "tinker://run-id/weights/checkpoint_000050"
+
+# Generation
+max_response_tokens: 4096
+max_total_tokens: 32768
+max_rollout_retries: 3
+
+# Training
+loss_fn: "ppo"  # importance_sampling, ppo, cispo, dro
+loss_fn_config:
+  clip_low_threshold: 0.8
+  clip_high_threshold: 1.2
+advantage_calculation: "centered_normalized"
+batch_size: 32
+learning_rate: 1e-5  # TODO: tune -- rank 8 on 30B may want 5e-6 to 2e-5
+weight_decay: 0.0
+num_epochs: null  # null for infinite training
+save_every: 10
+
+# Concurrency -- no caps
+max_active_tasks: 999999
+max_rollout_concurrency: null
+rollout_timeout: 300  # seconds per rollout
+
+# Agent
+thinking: false
+seed: 42
+
+# Environments
+environments:
+  GeneralReasoning/WhoDunit:
+    splits:
+      train:
+        shuffle: true
+        num_samples: null
+    num_rollouts: 16
+    max_failing_rollouts: 2
+    temperature: 1.0
+    reward_reduction: "sum"
+    nonterminal_reward: 0.0
+    # Optional: environment-specific secrets override
+    # secrets:
+    #   openai_api_key: "sk-different-key-for-this-env"

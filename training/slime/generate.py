@@ -346,9 +346,6 @@ async def generate(args: Any, sample: Any, sampling_params: Any) -> Any:
                     content_ids = gen.output_ids
                     content_lps = gen.logprobs
 
-                # Strip <response>...</response> tags (Qwen3 artifact with thinking disabled)
-                generated_for_parse = generated_for_parse.replace("<response>", "").replace("</response>", "").strip()
-
                 tc = parse_tool_call(generated_for_parse)
 
                 if tc is None:

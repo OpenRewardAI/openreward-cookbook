@@ -381,7 +381,12 @@ async def generate(args: Any, sample: Any, sampling_params: Any) -> Any:
                     segments.append((f"\n<|im_start|>user\n{error_msg}<|im_end|>", False))
                     _append_text_tokens(f"\n<|im_start|>user\n{error_msg}<|im_end|>", tokenizer, response_ids, response_lps, response_mask, 0)
 
-                    or_blocks.append({"message": AssistantMessage(content=generated_for_parse.strip())})
+                    # Log content before <tool_call> separately from the raw tool call
+                    tc_idx = generated_for_parse.find("<tool_call>")
+                    pre_tc_text = generated_for_parse[:tc_idx].strip() if tc_idx > 0 else ""
+                    if pre_tc_text:
+                        or_blocks.append({"message": AssistantMessage(content=pre_tc_text)})
+                    or_blocks.append({"message": AssistantMessage(content=tc["raw"])})
                     or_blocks.append({"message": UserMessage(content=error_msg)})
                     continue
 
@@ -402,6 +407,12 @@ async def generate(args: Any, sample: Any, sampling_params: Any) -> Any:
                 _append_text_tokens("<|im_end|>", tokenizer, response_ids, response_lps, response_mask, 0)
 
                 call_id = hashlib.md5(f"{_turn}:{tc['name']}".encode()).hexdigest()[:12]
+
+                # Log assistant text before <tool_call> (if any) + the tool call itself
+                tc_idx = generated_for_parse.find("<tool_call>")
+                pre_tc_text = generated_for_parse[:tc_idx].strip() if tc_idx > 0 else ""
+                if pre_tc_text:
+                    or_blocks.append({"message": AssistantMessage(content=pre_tc_text)})
                 or_blocks.append({"message": ToolCall(
                     name=tc["name"], content=json.dumps(tc["arguments"]), call_id=call_id,
                 )})

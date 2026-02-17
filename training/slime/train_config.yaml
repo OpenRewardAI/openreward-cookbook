@@ -1,6 +1,7 @@
 environments:
   GeneralReasoning/WhoDunit:
-    splits: [train]
+    splits:
+      - train
     nonterminal_reward: 0.0
     reward_reduction: sum
     max_turns: 20

@@ -300,7 +300,7 @@ async def generate(args: Any, sample: Any, sampling_params: Any) -> Any:
                 prompt_tok_count = len(tokenizer.encode(full_text, add_special_tokens=False))
                 effective_max = min(
                     max_response_tokens,
-                    getattr(args, "rollout_max_total_len", 32768) - prompt_tok_count,
+                    getattr(args, "rollout_max_total_len", 8192) - prompt_tok_count,
                 )
                 if effective_max <= 0:
                     stop_reason = "max_tokens"

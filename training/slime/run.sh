@@ -37,7 +37,8 @@ Cluster:
 Rollout:
   --rollout-batch-size N    Prompts per rollout batch (default: 32)
   --n-samples N             Rollouts per prompt (default: 16)
-  --max-response-len N      Max response tokens (default: 4096)
+  --max-response-len N      Max response tokens per turn (default: 4096)
+  --max-total-len N         Max total tokens per rollout sequence (default: 8192)
   --max-tokens-per-gpu N    Max tokens per GPU in training (OOM prevention, default: 8192)
   --temperature FLOAT       Sampling temperature (default: 1.0)
   --num-rollout N           Total training rounds (default: 3000)
@@ -80,6 +81,7 @@ TRAIN_BACKEND=fsdp
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES=16
 MAX_RESPONSE_LEN=4096
+MAX_TOTAL_LEN=8192
 MAX_TOKENS_PER_GPU=8192
 TEMPERATURE=1.0
 NUM_ROLLOUT=3000
@@ -115,6 +117,7 @@ while [[ $# -gt 0 ]]; do
         --rollout-batch-size) ROLLOUT_BATCH_SIZE="$2"; shift 2 ;;
         --n-samples)         N_SAMPLES="$2"; shift 2 ;;
         --max-response-len)  MAX_RESPONSE_LEN="$2"; shift 2 ;;
+        --max-total-len)     MAX_TOTAL_LEN="$2"; shift 2 ;;
         --max-tokens-per-gpu) MAX_TOKENS_PER_GPU="$2"; shift 2 ;;
         --temperature)       TEMPERATURE="$2"; shift 2 ;;
         --num-rollout)       NUM_ROLLOUT="$2"; shift 2 ;;
@@ -194,7 +197,10 @@ python train_async.py \
     \
     --sglang-mem-fraction-static 0.8 \
     \
+    --use-wandb \
     --wandb-project "${WANDB_PROJECT}" \
     --wandb-run-name "${WANDB_RUN}" \
+    --wandb-key "${WANDB_API_KEY}" \
+    --wandb-group "${WANDB_PROJECT}" \
     \
     "${EXTRA_ARGS[@]}"

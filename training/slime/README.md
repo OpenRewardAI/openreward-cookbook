@@ -42,9 +42,6 @@ PyTorch and SLIME are expected to already be installed in your environment.
 export OPENREWARD_API_KEY=your_openreward_key_here
 export WANDB_API_KEY=your_wandb_key_here
 export OPENAI_API_KEY=your_openai_key_here  # If environments use LLM-based graders
-# Optional:
-# export OPENREWARD_BASE_URL=https://api.openreward.ai
-# export OPENREWARD_ENVIRONMENTS_URL=...
 ```
 
 ## Configuration

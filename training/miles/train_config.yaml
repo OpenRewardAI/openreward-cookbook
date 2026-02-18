@@ -1,0 +1,30 @@
+environments:
+  GeneralReasoning/WhoDunit:
+    splits:
+      - train
+    nonterminal_reward: 0.0
+    reward_reduction: sum
+    max_turns: 20
+
+secrets:
+  openai_api_key: null
+
+system_prompt_template: |
+  You are an agent that takes actions in a stateful environment to achieve a goal.
+
+  # Tools
+
+  You may call one or more functions to assist with the user query.
+
+  You are provided with function signatures within <tools></tools> XML tags:
+  <tools>
+  {tools}
+  </tools>
+
+  For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:
+  <tool_call>
+  {{"name": <function-name>, "arguments": <args-json-object>}}
+  </tool_call>
+
+thinking: false
+openreward_run_name: slime-rl-test-openreward

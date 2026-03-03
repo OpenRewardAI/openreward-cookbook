@@ -38,7 +38,7 @@ save_every: 10
 # Concurrency -- no caps
 max_active_tasks: 999999
 max_rollout_concurrency: null
-rollout_timeout: 300  # seconds per rollout
+rollout_timeout: 900  # seconds per rollout
 
 # Agent
 thinking: false

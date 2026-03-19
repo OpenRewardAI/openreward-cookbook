@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import itertools
 import json
 import logging
@@ -29,7 +28,7 @@ import tinker
 import tinker.types as tinker_types
 from openreward import AsyncOpenReward
 from openreward.client import DEFAULT_BASE_URL as OPENREWARD_BASE_URL
-from openreward.api.environments.client import AsyncEnvironment, Task
+from openreward.api.environments.client import AsyncEnvironment
 from openreward.api.environments.types import TextBlock, ToolCallError, ToolOutput
 from openreward.api.rollouts.serializers.base import (
     AssistantMessage,
@@ -294,7 +293,7 @@ class AgentBlock:
 @dataclass
 class RolloutResult:
     """Result of a single rollout."""
-    task: Task
+    task_index: int
     env_name: str
     split: str
     blocks: list[AgentBlock]
@@ -800,7 +799,7 @@ async def upload_rollout(
 @dataclass
 class TaskItem:
     """A single rollout task in the dataset."""
-    task: Task
+    task_index: int
     env_name: str
     deployment_name: str
     split: str
@@ -848,11 +847,11 @@ async def run(config: Config, settings: Settings) -> None:
     # -- Fetch tasks from all environments --
     env_configs: dict[str, EnvironmentConfig] = {}
     env_deployments: dict[str, str] = {}
-    tasks: dict[str, dict[str, list[Task]]] = defaultdict(dict)
+    task_indices: dict[str, dict[str, list[int]]] = defaultdict(dict)
 
-    async def get_tasks(env: AsyncEnvironment, split: str, env_key: str) -> None:
+    async def get_task_indices(env: AsyncEnvironment, split: str, env_key: str) -> None:
         try:
-            env_tasks = await env.list_tasks(split)
+            count = await env.num_tasks(split)
         except aiohttp.ClientResponseError as e:
             if e.status == 404:
                 parts = env_key.split("/")
@@ -868,12 +867,13 @@ async def run(config: Config, settings: Settings) -> None:
                 failed_envs.append(env_key)
                 return
             raise
+        indices = list(range(count))
         split_config = env_configs[env.name].splits[split]
         if split_config.shuffle:
-            random.shuffle(env_tasks)
+            random.shuffle(indices)
         if split_config.num_samples is not None:
-            env_tasks = env_tasks[:split_config.num_samples]
-        tasks[env.name][split] = env_tasks
+            indices = indices[:split_config.num_samples]
+        task_indices[env.name][split] = indices
         env_deployments[env.name] = env.deployment_name
 
     failed_envs: list[str] = []
@@ -882,9 +882,9 @@ async def run(config: Config, settings: Settings) -> None:
         env = or_client.environments.get(name)
         env_configs[env.name] = env_config
         for split_name in env_config.splits:
-            fetch_coros.append(get_tasks(env, split_name, env_key=name))
+            fetch_coros.append(get_task_indices(env, split_name, env_key=name))
 
-    log.info("Fetching tasks from environments...")
+    log.info("Fetching task info from environments...")
     await asyncio.gather(*fetch_coros)
 
     if failed_envs:
@@ -897,15 +897,15 @@ async def run(config: Config, settings: Settings) -> None:
 
     # -- Build flat dataset --
     dataset: dict[str, list[TaskItem]] = defaultdict(list)
-    for env_name, splits in tasks.items():
+    for env_name, splits in task_indices.items():
         env = or_client.environments.get(env_deployments[env_name])
         ec = env_configs[env_name]
-        for split_name, split_tasks in splits.items():
-            for task in split_tasks:
-                task_id = f"{env_name}:{split_name}:{hashlib.sha256(json.dumps(task.task_spec).encode()).hexdigest()[:16]}"
+        for split_name, indices in splits.items():
+            for idx in indices:
+                task_id = f"{env_name}:{split_name}:{idx}"
                 for i in range(ec.num_rollouts):
                     dataset[task_id].append(TaskItem(
-                        task=task,
+                        task_index=idx,
                         env_name=env_name,
                         deployment_name=env.deployment_name,
                         split=split_name,
@@ -913,12 +913,12 @@ async def run(config: Config, settings: Settings) -> None:
                     ))
 
     task_ids = list(dataset.keys())
-    num_tasks = len(task_ids)
-    log.info(f"Found {num_tasks} tasks, {sum(len(v) for v in dataset.values())} total rollouts")
+    num_task_groups = len(task_ids)
+    log.info(f"Found {num_task_groups} tasks, {sum(len(v) for v in dataset.values())} total rollouts")
 
     num_steps = None
     if config.num_epochs is not None:
-        num_steps = config.num_epochs * (num_tasks // config.batch_size)
+        num_steps = config.num_epochs * (num_task_groups // config.batch_size)
         log.info(f"Training for {num_steps} steps ({config.num_epochs} epochs)")
 
     # -- Wandb --
@@ -947,7 +947,7 @@ async def run(config: Config, settings: Settings) -> None:
         secrets = resolve_secrets(ec, config.secrets, settings)
 
         result = RolloutResult(
-            task=item.task,
+            task_index=item.task_index,
             env_name=item.env_name,
             split=item.split,
             blocks=[],
@@ -971,7 +971,7 @@ async def run(config: Config, settings: Settings) -> None:
             try:
                 async with sem:
                     # Pass secrets to session
-                    session = env.session(item.task, secrets=secrets if secrets else None)
+                    session = env.session(split=item.split, index=item.task_index, secrets=secrets if secrets else None)
                     async with session as active_session:
                         blocks, all_tok, resp_tok, resp_lp, stop_reason, extra = await run_agent_rollout(
                             sampling_client=sampling_client,
@@ -1014,8 +1014,7 @@ async def run(config: Config, settings: Settings) -> None:
 
         # Upload to OpenReward
         if result.blocks:
-            task_hash = hashlib.sha256(json.dumps(item.task.task_spec).encode()).hexdigest()[:16]
-            rollout_name = f"{item.env_name}-{task_hash}-step{step}-r{item.rollout_idx}"
+            rollout_name = f"{item.env_name}-{item.split}-{item.task_index}-step{step}-r{item.rollout_idx}"
             asyncio.create_task(upload_rollout(
                 or_client=or_client,
                 run_name=config.openreward_run_name,
@@ -1023,7 +1022,7 @@ async def run(config: Config, settings: Settings) -> None:
                 deployment_name=item.deployment_name,
                 split=item.split,
                 blocks=result.blocks,
-                task_spec=item.task.task_spec,
+                task_spec=None,
                 metadata={"step": step, "rollout_idx": item.rollout_idx, "stop": result.stop, **result.extra},
             ))
 

@@ -113,6 +113,16 @@ def _print_capacity_error(env_name: str, config: "Config") -> None:
     )
 
 
+def _summarize_error(exc: BaseException) -> str:
+    """Return a one-line summary for known transient errors, full traceback otherwise."""
+    msg = str(exc)
+    if "Session creation timed out" in msg:
+        return f"Session creation timed out ({type(exc).__name__})"
+    if isinstance(exc, RuntimeError) and ("500," in msg or "502," in msg or "503," in msg):
+        return f"Server error: {msg.splitlines()[0]}"
+    return traceback.format_exc()
+
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -984,9 +994,9 @@ async def run(config: Config, settings: Settings) -> None:
                         capacity_error_env.append(item.env_name)
                     capacity_error_event.set()
                     raise EnvironmentCapacityError(item.env_name) from exc
-                err = traceback.format_exc()
-                result.errors.append(err)
-                log.warning(f"Rollout attempt {attempt + 1} failed: {err}")
+                err_msg = _summarize_error(exc)
+                result.errors.append(err_msg)
+                log.warning(f"Rollout attempt {attempt + 1} failed: {err_msg}")
                 if attempt >= config.max_rollout_retries:
                     result.stop = "max_retries"
 
@@ -1110,7 +1120,7 @@ async def run(config: Config, settings: Settings) -> None:
                 continue
             if isinstance(result, BaseException):
                 n_error += 1
-                log.warning(f"Rollout raised exception: {result}")
+                log.warning(f"Rollout raised exception: {_summarize_error(result)}")
                 continue
             rollout_map[tid].append(result)
 

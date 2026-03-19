@@ -852,7 +852,7 @@ async def run(config: Config, settings: Settings) -> None:
 
     async def get_tasks(env: AsyncEnvironment, split: str, env_key: str) -> None:
         try:
-            env_tasks = await env.list_tasks(split)
+            total = await env.num_tasks(split)
         except aiohttp.ClientResponseError as e:
             if e.status == 404:
                 parts = env_key.split("/")
@@ -869,11 +869,15 @@ async def run(config: Config, settings: Settings) -> None:
                 return
             raise
         split_config = env_configs[env.name].splits[split]
+        indices = list(range(total))
         if split_config.shuffle:
-            random.shuffle(env_tasks)
+            random.shuffle(indices)
         if split_config.num_samples is not None:
-            env_tasks = env_tasks[:split_config.num_samples]
-        tasks[env.name][split] = env_tasks
+            indices = indices[:split_config.num_samples]
+        env_tasks = await asyncio.gather(
+            *[env.get_task(split, index=i) for i in indices]
+        )
+        tasks[env.name][split] = list(env_tasks)
         env_deployments[env.name] = env.deployment_name
 
     failed_envs: list[str] = []

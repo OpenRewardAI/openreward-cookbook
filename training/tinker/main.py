@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 import traceback
 import uuid
@@ -15,6 +16,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Any, Literal, TypeAlias, cast
 
+import aiohttp
 import numpy as np
 import torch
 import wandb
@@ -49,6 +51,67 @@ RewardReduction: TypeAlias = Literal["sum", "mean", "max", "min"]
 AdvantageCalculation: TypeAlias = Literal["direct", "centered", "centered_normalized"]
 StopReason: TypeAlias = Literal["max_tokens", "reached_terminal_state", "max_retries", "error"]
 TinkerLossFn: TypeAlias = Literal["importance_sampling", "ppo", "cispo", "dro"]
+
+
+# ============================================================================
+# 429 Capacity Error Handling
+# ============================================================================
+
+
+class EnvironmentCapacityError(Exception):
+    """Raised when the OpenReward environment returns 429 (at maximum capacity)."""
+    def __init__(self, env_name: str):
+        self.env_name = env_name
+        super().__init__(f"Environment '{env_name}' is at maximum capacity (HTTP 429)")
+
+
+def _is_capacity_error(exc: BaseException) -> bool:
+    """Check whether an exception represents a 429 capacity error from OpenReward."""
+    # Check MaxRetriesError.errors list for ClientResponseError with status 429
+    if hasattr(exc, 'errors') and isinstance(exc.errors, list):
+        for inner in exc.errors:
+            if hasattr(inner, 'status') and inner.status == 429:
+                return True
+    # Direct ClientResponseError with status 429
+    if hasattr(exc, 'status') and exc.status == 429:
+        return True
+    # Fallback: string match for wrapped/annotated errors
+    err_str = str(exc)
+    if '429' in err_str and 'maximum capacity' in err_str.lower():
+        return True
+    return False
+
+
+def _print_capacity_error(env_name: str, config: "Config") -> None:
+    """Print a clean, user-friendly error message for 429 capacity errors."""
+    RED = "\033[31m"
+    YELLOW = "\033[33m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+    DIM = "\033[2m"
+
+    concurrency = config.max_rollout_concurrency or config.max_active_tasks
+
+    print(
+        f"\n{RED}{BOLD}"
+        "=========================================================================\n"
+        "  ERROR 429: You Hit Concurrency and Max Pods Limits for the Environment\n"
+        "========================================================================="
+        f"{RESET}\n\n"
+        f"  Environment {BOLD}{env_name}{RESET} rejected new sessions because the concurrency limit has been exceeded.\n\n"
+        f"  {BOLD}Your current settings:{RESET}\n"
+        f"    max_rollout_concurrency:  {concurrency}\n"
+        f"    batch_size:               {config.batch_size}\n\n"
+        f"  {BOLD}To fix this, try one of the following:{RESET}\n\n"
+        f"    {YELLOW}1.{RESET} Reduce your training concurrency in tinker-config.yaml:\n"
+        f"       {DIM}max_rollout_concurrency: <lower value>{RESET}\n\n"
+        f"    {YELLOW}2.{RESET} If you are the environment owner, increase the limits\n"
+        f"       (max pods or sessions-per-pod) for {BOLD}{env_name}{RESET}:\n"
+        f"       {DIM}https://openreward.ai/{env_name}{RESET}\n\n"
+        f"    {YELLOW}3.{RESET} If you are not the environment owner, contact them and let them know you are hitting capacity limits.\n",
+        file=sys.stderr,
+    )
+
 
 # ============================================================================
 # Configuration
@@ -777,8 +840,24 @@ async def run(config: Config, settings: Settings) -> None:
     env_deployments: dict[str, str] = {}
     tasks: dict[str, dict[str, list[Task]]] = defaultdict(dict)
 
-    async def get_tasks(env: AsyncEnvironment, split: str) -> None:
-        env_tasks = await env.list_tasks(split)
+    async def get_tasks(env: AsyncEnvironment, split: str, env_key: str) -> None:
+        try:
+            env_tasks = await env.list_tasks(split)
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                parts = env_key.split("/")
+                namespace = parts[0] if len(parts) > 1 else env_key
+                env_short = parts[1] if len(parts) > 1 else env_key
+                log.error(
+                    f"\n\n"
+                    f"  Could not find deployment for environment '{env_key}'.\n\n"
+                    f"  Suggestions:\n\n"
+                    f"    1. Check https://openreward.ai/{namespace}/{env_short} and its deployments to see if it has been built.\n\n"
+                    f"    2. Check for typos in your config.\n"
+                )
+                failed_envs.append(env_key)
+                return
+            raise
         split_config = env_configs[env.name].splits[split]
         if split_config.shuffle:
             random.shuffle(env_tasks)
@@ -787,15 +866,24 @@ async def run(config: Config, settings: Settings) -> None:
         tasks[env.name][split] = env_tasks
         env_deployments[env.name] = env.deployment_name
 
+    failed_envs: list[str] = []
     fetch_coros = []
     for name, env_config in config.environments.items():
         env = or_client.environments.get(name)
         env_configs[env.name] = env_config
         for split_name in env_config.splits:
-            fetch_coros.append(get_tasks(env, split_name))
+            fetch_coros.append(get_tasks(env, split_name, env_key=name))
 
     log.info("Fetching tasks from environments...")
     await asyncio.gather(*fetch_coros)
+
+    if failed_envs:
+        unique_failed = sorted(set(failed_envs))
+        log.error(
+            f"Failed to fetch tasks for {len(unique_failed)} environment(s): {', '.join(unique_failed)}. "
+            f"Cannot proceed with training. Exiting."
+        )
+        sys.exit(1)
 
     # -- Build flat dataset --
     dataset: dict[str, list[TaskItem]] = defaultdict(list)
@@ -832,6 +920,8 @@ async def run(config: Config, settings: Settings) -> None:
 
     # -- Concurrency control --
     sem = asyncio.Semaphore(config.max_rollout_concurrency or config.max_active_tasks)
+    capacity_error_event = asyncio.Event()
+    capacity_error_env: list[str] = []  # first env that hit 429
 
     # -- Rollout helper --
     rollout_progress: dict[int, int] = {}  # step -> completed count
@@ -863,6 +953,11 @@ async def run(config: Config, settings: Settings) -> None:
 
         t0 = time.perf_counter()
         for attempt in range(config.max_rollout_retries + 1):
+            # Bail out early if another rollout already detected a capacity error
+            if capacity_error_event.is_set():
+                raise EnvironmentCapacityError(
+                    capacity_error_env[0] if capacity_error_env else item.env_name
+                )
             try:
                 async with sem:
                     # Pass secrets to session
@@ -882,7 +977,13 @@ async def run(config: Config, settings: Settings) -> None:
                         result.stop = stop_reason
                         result.extra = extra
                         break
-            except Exception:
+            except Exception as exc:
+                # 429 capacity errors should terminate the entire run
+                if _is_capacity_error(exc):
+                    if not capacity_error_env:
+                        capacity_error_env.append(item.env_name)
+                    capacity_error_event.set()
+                    raise EnvironmentCapacityError(item.env_name) from exc
                 err = traceback.format_exc()
                 result.errors.append(err)
                 log.warning(f"Rollout attempt {attempt + 1} failed: {err}")
@@ -934,6 +1035,7 @@ async def run(config: Config, settings: Settings) -> None:
 
     # -- Main loop --
     step = 0
+    capacity_err: EnvironmentCapacityError | None = None
     metrics_file = open(os.path.join(config.log_path, "metrics.jsonl"), "a")
 
     while True:
@@ -987,6 +1089,16 @@ async def run(config: Config, settings: Settings) -> None:
 
         progress_done.set()
         reporter_task.cancel()
+
+        # Check if any rollout hit a 429 capacity error -- terminate immediately
+        capacity_err = None
+        for result in raw_results:
+            if isinstance(result, EnvironmentCapacityError):
+                capacity_err = result
+                break
+        if capacity_err is not None:
+            _print_capacity_error(capacity_err.env_name, config)
+            break
 
         # Group rollouts by task_id
         rollout_map: dict[str, list[RolloutResult]] = defaultdict(list)
@@ -1164,8 +1276,11 @@ async def run(config: Config, settings: Settings) -> None:
         step += 1
 
     metrics_file.close()
-    log.info("Training complete")
-    wandb.finish()
+    if capacity_err is not None:
+        wandb.finish(exit_code=1)
+    else:
+        log.info("Training complete")
+        wandb.finish()
 
 
 def _flatten_dict(d: dict, prefix: str = "") -> dict:

@@ -1,6 +1,6 @@
-openreward
+openreward>=0.1.84
 aiohttp
-numpy
+numpy<2
 pydantic
 pyyaml
 transformers

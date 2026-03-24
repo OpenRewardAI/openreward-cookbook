@@ -6,7 +6,7 @@ Multi-environment reinforcement learning training using [Miles](https://github.c
 
 This project implements a custom Miles rollout integration that:
 - Runs multi-turn agent interactions with tool use against OpenReward environments
-- Uses SGLang for fast inference and Miles' FSDP or Megatron backend for training
+- Uses SGLang for fast inference and Miles' FSDP (default) or Megatron backend for training
 - Implements GRPO advantage estimation with per-token loss masking
 - Tracks per-token log probabilities from rollout for importance sampling
 - Uploads trajectories to OpenReward for visualization
@@ -49,6 +49,43 @@ PyTorch and Miles are expected to already be installed in your environment.
 export OPENREWARD_API_KEY=your_openreward_key_here
 export WANDB_API_KEY=your_wandb_key_here
 export OPENAI_API_KEY=your_openai_key_here  # If environments use LLM-based graders
+```
+
+## Quick Start
+
+This walks through a small test run with Qwen3-0.6B on the WhoDunit environment using 4 GPUs. For a real training run, use a larger model and the default batch/rollout settings in `run.sh`.
+
+With Miles' FSDP backend (the default), no checkpoint conversion is needed — it loads HF checkpoints directly.
+
+### 1. Prepare tasks
+
+Fetch tasks from OpenReward and write a Miles-compatible JSONL dataset:
+
+```bash
+python prepare_tasks.py --config train_config.yaml --output tasks.jsonl
+```
+
+Use `--max-tasks N` to cap the number of tasks (useful for testing).
+
+### 2. Run training
+
+```bash
+bash run.sh \
+    --model /path/to/Qwen3-0.6B-Instruct/ \
+    --num-gpus 4 \
+    --tp 1 \
+    --rollout-batch-size 4 \
+    --n-samples 2 \
+    --num-rollout 10
+```
+
+For a larger model like Qwen3-30B-A3B, the defaults in `run.sh` (batch 32, 16 samples, tp=4) are a good starting point.
+
+The script will:
+1. Connect to an existing Ray cluster (or start a local one if none is found)
+2. Launch SGLang inference engines (colocated with training on the same GPUs)
+3. Load the HF checkpoint for both training (FSDP) and inference (SGLang)
+4. Run the GRPO training loop with OpenReward rollouts
 ```
 
 ## Configuration
@@ -119,38 +156,31 @@ environments:
 
 ## Usage
 
-### 1. Prepare tasks
+See the Quick Start section above for a complete walkthrough. The key steps are:
 
-Fetch tasks from OpenReward and write a Miles-compatible JSONL dataset:
-
-```bash
-python prepare_tasks.py --config train_config.yaml --output tasks.jsonl
-```
-
-### 2. Run training
-
-From the Miles repo root:
-
-```bash
-cd /path/to/miles
-bash /path/to/this/run.sh
-```
+1. Prepare tasks with `prepare_tasks.py`
+2. Run training with `run.sh`
 
 Common overrides:
 
 ```bash
 # Different model
-bash run.sh --model Qwen/Qwen3-4B
+bash run.sh --model Qwen/Qwen3-4B ...
 
-# Adjust GPU allocation
-bash run.sh --actor-gpus 4 --rollout-gpus 4 --tp 4
+# Adjust GPU count
+bash run.sh --num-gpus 8 --tp 4 ...
 
 # Tune training
-bash run.sh --lr 5e-6 --n-samples 8 --rollout-batch-size 16
+bash run.sh --lr 5e-6 --n-samples 8 --rollout-batch-size 16 ...
+
+# Use megatron backend instead of FSDP
+bash run.sh --train-backend megatron ...
 
 # Pass arbitrary Miles args after --
-bash run.sh -- --context-parallel-size 2 --use-kl-loss --kl-loss-coef 0.01
+bash run.sh ... -- --context-parallel-size 2 --use-kl-loss --kl-loss-coef 0.01
 ```
+
+Run `bash run.sh --help` for the full list of flags.
 
 ### Key training flags
 

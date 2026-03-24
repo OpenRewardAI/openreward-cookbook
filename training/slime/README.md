@@ -6,7 +6,7 @@ Multi-environment reinforcement learning training using [SLIME](https://github.c
 
 This project implements a custom SLIME rollout integration that:
 - Runs multi-turn agent interactions with tool use against OpenReward environments
-- Uses SGLang for fast inference and SLIME's FSDP or Megatron backend for training
+- Uses SGLang for fast inference and SLIME's Megatron backend for training
 - Implements GRPO advantage estimation with per-token loss masking
 - Tracks per-token log probabilities from rollout for importance sampling
 - Uploads trajectories to OpenReward for visualization
@@ -42,6 +42,65 @@ PyTorch and SLIME are expected to already be installed in your environment.
 export OPENREWARD_API_KEY=your_openreward_key_here
 export WANDB_API_KEY=your_wandb_key_here
 export OPENAI_API_KEY=your_openai_key_here  # If environments use LLM-based graders
+```
+
+## Quick Start
+
+This walks through a small test run with Qwen3-0.6B on the WhoDunit environment using 4 GPUs. For a real training run, use a larger model and the default batch/rollout settings in `run.sh`.
+
+### 1. Convert HF checkpoint to Megatron format
+
+SLIME's training backend uses Megatron, which requires a converted checkpoint. The `--hf-checkpoint` flag is only used for SGLang inference — training needs a separate Megatron-format checkpoint.
+
+```bash
+source /path/to/slime/scripts/models/qwen3-0.6B.sh  # Sets MODEL_ARGS
+
+PYTHONPATH=/path/to/Megatron-LM/:$PYTHONPATH \
+CUDA_DEVICE_MAX_CONNECTIONS=1 \
+python /path/to/slime/tools/convert_hf_to_torch_dist.py \
+    ${MODEL_ARGS[@]} \
+    --hf-checkpoint /path/to/Qwen3-0.6B-Instruct/ \
+    --save ./megatron-ckpt/ \
+    --tensor-model-parallel-size 1 \
+    --pipeline-model-parallel-size 1 \
+    --attention-backend flash \
+    --attention-dropout 0.0 \
+    --hidden-dropout 0.0
+```
+
+SLIME provides model architecture scripts in `slime/scripts/models/` for supported models (Qwen3, Llama, GLM, DeepSeek, etc.). Each script sets `MODEL_ARGS` with the correct `--num-layers`, `--hidden-size`, etc.
+
+### 2. Prepare tasks
+
+Fetch tasks from OpenReward and write a SLIME-compatible JSONL dataset:
+
+```bash
+python prepare_tasks.py --config train_config.yaml --output tasks.jsonl
+```
+
+Use `--max-tasks N` to cap the number of tasks (useful for testing).
+
+### 3. Run training
+
+```bash
+bash run.sh \
+    --model /path/to/Qwen3-0.6B-Instruct/ \
+    --megatron-ckpt ./megatron-ckpt/ \
+    --model-args /path/to/slime/scripts/models/qwen3-0.6B.sh \
+    --num-gpus 4 \
+    --tp 1 \
+    --rollout-batch-size 4 \
+    --n-samples 2 \
+    --num-rollout 10
+```
+
+For a larger model like Qwen3-30B-A3B, the defaults in `run.sh` (batch 32, 16 samples, tp=4) are a good starting point.
+
+The script will:
+1. Connect to an existing Ray cluster (or start a local one if none is found)
+2. Launch SGLang inference engines (colocated with training on the same GPUs)
+3. Load the Megatron checkpoint and sync weights to SGLang
+4. Run the GRPO training loop with OpenReward rollouts
 ```
 
 ## Configuration
@@ -112,41 +171,29 @@ environments:
 
 ## Usage
 
-### 1. Prepare tasks
+See the Quick Start section above for a complete walkthrough. The key steps are:
 
-Fetch tasks from OpenReward and write a SLIME-compatible JSONL dataset:
-
-```bash
-python prepare_tasks.py --config train_config.yaml --output tasks.jsonl
-```
-
-### 2. Run training
-
-From the SLIME repo root:
-
-```bash
-cd /path/to/slime
-bash /path/to/this/run.sh
-```
+1. Convert your HF checkpoint to Megatron format
+2. Prepare tasks with `prepare_tasks.py`
+3. Run training with `run.sh`
 
 Common overrides:
 
 ```bash
 # Different model
-bash run.sh --model Qwen/Qwen3-4B
+bash run.sh --model Qwen/Qwen3-4B ...
 
-# Adjust GPU allocation
-bash run.sh --actor-gpus 4 --rollout-gpus 4 --tp 4
+# Adjust GPU count
+bash run.sh --num-gpus 8 --tp 4 ...
 
 # Tune training
-bash run.sh --lr 5e-6 --n-samples 8 --rollout-batch-size 16
+bash run.sh --lr 5e-6 --n-samples 8 --rollout-batch-size 16 ...
 
-# Enable gradient checkpointing (reduces memory, ~10% slower)
-bash run.sh -- --gradient-checkpointing
-
-# Pass arbitrary SLIME args after --
-bash run.sh -- --context-parallel-size 2 --use-kl-loss --kl-loss-coef 0.01
+# Pass arbitrary SLIME/Megatron args after --
+bash run.sh ... -- --context-parallel-size 2 --use-kl-loss --kl-loss-coef 0.01
 ```
+
+Run `bash run.sh --help` for the full list of flags.
 
 ### Key training flags
 
@@ -159,15 +206,15 @@ bash run.sh -- --context-parallel-size 2 --use-kl-loss --kl-loss-coef 0.01
 | `--max-response-len` | `4096` | Max response tokens per generation call |
 | `--max-tokens-per-gpu` | `8192` | Token cap per GPU in training (OOM prevention) |
 | `--temperature` | `1.0` | Sampling temperature |
-| `--train-backend` | `fsdp` | `fsdp` or `megatron` |
+| `--tp` | `4` | Tensor parallel size per rollout engine |
 
 ### Resuming from checkpoint
 
-```bash
-bash run.sh --load /path/to/checkpoints/
-```
+SLIME auto-resumes from the latest checkpoint when `--save` contains a prior checkpoint:
 
-SLIME auto-resumes from the latest checkpoint in `--load` if one exists.
+```bash
+bash run.sh ... --megatron-ckpt ./checkpoints/
+```
 
 ## Project Structure
 

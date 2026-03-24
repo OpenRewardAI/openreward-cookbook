@@ -54,7 +54,7 @@ class IntegrationConfig(BaseModel, extra="forbid"):
     thinking: bool = False
     """Whether the model uses <think> blocks."""
 
-    openreward_run_name: str = "slime-training"
+    openreward_run_name: str = "miles-training"
     """Run name for OpenReward rollout uploads."""
 
 

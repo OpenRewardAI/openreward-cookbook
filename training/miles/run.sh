@@ -4,9 +4,13 @@ set -euo pipefail
 # ============================================================================
 # OpenReward + Miles training launch script
 #
-# Run from the miles repo root:
-#   cd /path/to/miles
-#   bash /path/to/this/run.sh [OPTIONS]
+# Prerequisites:
+#   1. Miles installed with all dependencies
+#   2. Tasks prepared with prepare_tasks.py
+#   3. Environment variables set (OPENREWARD_API_KEY, WANDB_API_KEY)
+#
+# Usage:
+#   bash run.sh [OPTIONS]
 # ============================================================================
 
 usage() {
@@ -14,9 +18,9 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Model & checkpoint:
-  --model NAME              HF checkpoint name (default: Qwen/Qwen3-30B-A3B)
+  --model NAME              HF checkpoint name or path (default: Qwen/Qwen3-30B-A3B)
   --save DIR                Checkpoint save directory
-  --load DIR                Checkpoint load directory
+  --load DIR                Checkpoint load directory (default: same as --model)
   --save-interval N         Save every N steps (default: 10)
 
 Optimizer:
@@ -28,8 +32,7 @@ Optimizer:
   --lr-decay-style STR      LR schedule: constant, cosine, linear (default: constant)
 
 Cluster:
-  --actor-gpus N            GPUs for training (default: 4)
-  --rollout-gpus N          GPUs for rollout (default: 4)
+  --num-gpus N              Total GPUs per node (default: 4, uses --colocate mode)
   --tp N                    GPUs per rollout engine / tensor parallel (default: 4)
   --actor-nodes N           Number of training nodes (default: 1)
   --train-backend STR       Training backend: fsdp or megatron (default: fsdp)
@@ -38,7 +41,6 @@ Rollout:
   --rollout-batch-size N    Prompts per rollout batch (default: 32)
   --n-samples N             Rollouts per prompt (default: 16)
   --max-response-len N      Max response tokens per turn (default: 4096)
-  --max-total-len N         Max total tokens per rollout sequence (default: 8192)
   --max-tokens-per-gpu N    Max tokens per GPU in training (OOM prevention, default: 8192)
   --temperature FLOAT       Sampling temperature (default: 1.0)
   --num-rollout N           Total training rounds (default: 3000)
@@ -50,7 +52,9 @@ Data:
 Extra:
   --wandb-project STR       Wandb project name
   --wandb-run STR           Wandb run name
-  -- EXTRA_ARGS...          Pass remaining args directly to train_async.py
+  --miles-path PATH         Path to Miles repo (default: auto-detect)
+  --megatron-path PATH      Path to Megatron-LM repo (default: auto-detect, needed for megatron backend)
+  -- EXTRA_ARGS...          Pass remaining args directly to train.py
 EOF
     exit 0
 }
@@ -62,7 +66,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODEL="Qwen/Qwen3-30B-A3B"
 SAVE_DIR="${SCRIPT_DIR}/checkpoints/"
-LOAD_DIR="${SCRIPT_DIR}/checkpoints/"
+LOAD_DIR=""
 SAVE_INTERVAL=10
 
 LR=1e-5
@@ -72,8 +76,7 @@ ADAM_BETA2=0.999
 ADAM_EPS=1e-8
 LR_DECAY_STYLE=constant
 
-ACTOR_GPUS=4
-ROLLOUT_GPUS=4
+NUM_GPUS=4
 TP=4
 ACTOR_NODES=1
 TRAIN_BACKEND=fsdp
@@ -81,7 +84,6 @@ TRAIN_BACKEND=fsdp
 ROLLOUT_BATCH_SIZE=32
 N_SAMPLES=16
 MAX_RESPONSE_LEN=4096
-MAX_TOTAL_LEN=8192
 MAX_TOKENS_PER_GPU=8192
 TEMPERATURE=1.0
 NUM_ROLLOUT=3000
@@ -90,7 +92,10 @@ TASK_DATA="${SCRIPT_DIR}/tasks.jsonl"
 TRAIN_CONFIG="${SCRIPT_DIR}/train_config.yaml"
 
 WANDB_PROJECT="miles-openreward"
-WANDB_RUN="miles-rl-openreward-$(date +%Y%m%d-%H%M%S)"
+WANDB_RUN="miles-openreward-$(date +%Y%m%d-%H%M%S)"
+
+MILES_PATH=""
+MEGATRON_PATH=""
 EXTRA_ARGS=()
 
 # ============================================================================
@@ -109,15 +114,13 @@ while [[ $# -gt 0 ]]; do
         --adam-beta2)        ADAM_BETA2="$2"; shift 2 ;;
         --adam-eps)          ADAM_EPS="$2"; shift 2 ;;
         --lr-decay-style)    LR_DECAY_STYLE="$2"; shift 2 ;;
-        --actor-gpus)        ACTOR_GPUS="$2"; shift 2 ;;
-        --rollout-gpus)      ROLLOUT_GPUS="$2"; shift 2 ;;
+        --num-gpus)          NUM_GPUS="$2"; shift 2 ;;
         --tp)                TP="$2"; shift 2 ;;
         --actor-nodes)       ACTOR_NODES="$2"; shift 2 ;;
         --train-backend)     TRAIN_BACKEND="$2"; shift 2 ;;
         --rollout-batch-size) ROLLOUT_BATCH_SIZE="$2"; shift 2 ;;
         --n-samples)         N_SAMPLES="$2"; shift 2 ;;
         --max-response-len)  MAX_RESPONSE_LEN="$2"; shift 2 ;;
-        --max-total-len)     MAX_TOTAL_LEN="$2"; shift 2 ;;
         --max-tokens-per-gpu) MAX_TOKENS_PER_GPU="$2"; shift 2 ;;
         --temperature)       TEMPERATURE="$2"; shift 2 ;;
         --num-rollout)       NUM_ROLLOUT="$2"; shift 2 ;;
@@ -125,21 +128,62 @@ while [[ $# -gt 0 ]]; do
         --config)            TRAIN_CONFIG="$2"; shift 2 ;;
         --wandb-project)     WANDB_PROJECT="$2"; shift 2 ;;
         --wandb-run)         WANDB_RUN="$2"; shift 2 ;;
+        --miles-path)        MILES_PATH="$2"; shift 2 ;;
+        --megatron-path)     MEGATRON_PATH="$2"; shift 2 ;;
         --)                  shift; EXTRA_ARGS+=("$@"); break ;;
         *)                   echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
 
 # ============================================================================
+# Validate and auto-detect
+# ============================================================================
+# Default --load to --model for FSDP (loads HF checkpoint directly)
+if [[ -z "${LOAD_DIR}" ]]; then
+    LOAD_DIR="${MODEL}"
+fi
+
+export OPENREWARD_API_KEY="${OPENREWARD_API_KEY:?Set OPENREWARD_API_KEY}"
+export WANDB_API_KEY="${WANDB_API_KEY:?Set WANDB_API_KEY}"
+
+if [[ -z "${MILES_PATH}" ]]; then
+    MILES_PATH="$(python3 -c 'import miles, os; print(os.path.dirname(os.path.dirname(miles.__file__)))' 2>/dev/null || true)"
+    if [[ -z "${MILES_PATH}" ]] || [[ ! -f "${MILES_PATH}/train.py" ]]; then
+        echo "ERROR: Cannot find Miles repo. Set --miles-path or install miles with: pip install -e /path/to/miles"; exit 1
+    fi
+fi
+
+if [[ -z "${MEGATRON_PATH}" ]]; then
+    MEGATRON_PATH="$(python3 -c 'import megatron.core, os; print(os.path.dirname(os.path.dirname(os.path.dirname(megatron.core.__file__))))' 2>/dev/null || true)"
+    # Megatron is optional for FSDP backend but needed for megatron backend
+    if [[ -z "${MEGATRON_PATH}" ]] && [[ "${TRAIN_BACKEND}" == "megatron" ]]; then
+        echo "ERROR: Cannot find Megatron-LM. Set --megatron-path or install megatron-core"; exit 1
+    fi
+fi
+
+# ============================================================================
 # Derived values
 # ============================================================================
-export OPENREWARD_API_KEY="${OPENREWARD_API_KEY:?Set OPENREWARD_API_KEY}"
 export OPENREWARD_RUN_NAME="${WANDB_RUN}"
 export TRAIN_CONFIG
-export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
-
-# global_batch_size = rollout_batch_size × n_samples ÷ num_steps_per_rollout
 GLOBAL_BATCH_SIZE=$(( ROLLOUT_BATCH_SIZE * N_SAMPLES ))
+
+# ============================================================================
+# Ensure Ray is running
+# ============================================================================
+RAY_ADDRESS="${RAY_ADDRESS:-http://127.0.0.1:8265}"
+
+if ! ray status 2>/dev/null | grep -q "Active:"; then
+    echo "No Ray cluster found, starting a local one..."
+    ray start --head \
+        --node-ip-address 127.0.0.1 \
+        --num-gpus "${NUM_GPUS}" \
+        --disable-usage-stats \
+        --dashboard-host=0.0.0.0 \
+        --dashboard-port=8265 \
+        --temp-dir /tmp/ray_miles
+    sleep 3
+fi
 
 # ============================================================================
 # Launch
@@ -151,32 +195,37 @@ echo "  Tasks:      ${TASK_DATA}"
 echo "  Config:     ${TRAIN_CONFIG}"
 echo "  Wandb:      ${WANDB_PROJECT} / ${WANDB_RUN}"
 echo "  Batch:      ${ROLLOUT_BATCH_SIZE} prompts × ${N_SAMPLES} samples = ${GLOBAL_BATCH_SIZE}"
-echo "  GPUs:       ${ACTOR_GPUS} train, ${ROLLOUT_GPUS} rollout (tp=${TP})"
+echo "  GPUs:       ${NUM_GPUS} (colocate mode, tp=${TP})"
 echo "  MaxTok/GPU: ${MAX_TOKENS_PER_GPU}"
 echo "  Backend:    ${TRAIN_BACKEND}"
 
-python train_async.py \
+RUNTIME_ENV_JSON="{
+  \"env_vars\": {
+    \"PYTHONPATH\": \"${MEGATRON_PATH:+${MEGATRON_PATH}/}:${SCRIPT_DIR}\",
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+    \"OPENREWARD_API_KEY\": \"${OPENREWARD_API_KEY}\",
+    \"OPENAI_API_KEY\": \"${OPENAI_API_KEY:-}\",
+    \"WANDB_API_KEY\": \"${WANDB_API_KEY}\",
+    \"TRAIN_CONFIG\": \"${TRAIN_CONFIG}\"
+  }
+}"
+
+ray job submit --address="${RAY_ADDRESS}" \
+    --runtime-env-json="${RUNTIME_ENV_JSON}" \
+    -- python3 "${MILES_PATH}/train.py" \
     --actor-num-nodes "${ACTOR_NODES}" \
-    --actor-num-gpus-per-node "${ACTOR_GPUS}" \
-    --rollout-num-gpus "${ROLLOUT_GPUS}" \
+    --actor-num-gpus-per-node "${NUM_GPUS}" \
+    --rollout-num-gpus "${NUM_GPUS}" \
+    --colocate \
     --rollout-num-gpus-per-engine "${TP}" \
     \
     --train-backend "${TRAIN_BACKEND}" \
+    --gradient-checkpointing \
     \
     --hf-checkpoint "${MODEL}" \
-    --save "${SAVE_DIR}" \
     --load "${LOAD_DIR}" \
+    --save "${SAVE_DIR}" \
     --save-interval "${SAVE_INTERVAL}" \
-    \
-    --optimizer adam \
-    --lr "${LR}" \
-    --lr-decay-style "${LR_DECAY_STYLE}" \
-    --weight-decay "${WEIGHT_DECAY}" \
-    --adam-beta1 "${ADAM_BETA1}" \
-    --adam-beta2 "${ADAM_BETA2}" \
-    --adam-eps "${ADAM_EPS}" \
-    \
-    --advantage-estimator grpo \
     \
     --prompt-data "${TASK_DATA}" \
     --input-key prompt \
@@ -191,11 +240,21 @@ python train_async.py \
     --rollout-temperature "${TEMPERATURE}" \
     --num-rollout "${NUM_ROLLOUT}" \
     \
+    --advantage-estimator grpo \
+    --eps-clip 0.2 \
+    \
+    --optimizer adam \
+    --lr "${LR}" \
+    --lr-decay-style "${LR_DECAY_STYLE}" \
+    --weight-decay "${WEIGHT_DECAY}" \
+    --adam-beta1 "${ADAM_BETA1}" \
+    --adam-beta2 "${ADAM_BETA2}" \
+    --adam-eps "${ADAM_EPS}" \
+    \
     --use-dynamic-batch-size \
     --max-tokens-per-gpu "${MAX_TOKENS_PER_GPU}" \
-    --gradient-checkpointing \
     \
-    --sglang-mem-fraction-static 0.8 \
+    --sglang-mem-fraction-static 0.7 \
     \
     --use-wandb \
     --wandb-project "${WANDB_PROJECT}" \

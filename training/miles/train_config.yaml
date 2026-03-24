@@ -27,4 +27,4 @@ system_prompt_template: |
   </tool_call>
 
 thinking: false
-openreward_run_name: slime-rl-test-openreward
+openreward_run_name: miles-rl-test-openreward
